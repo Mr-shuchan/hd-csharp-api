@@ -5,11 +5,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 引入核心人类图计算库 -->
-    <PackageReference Include="SharpAstrology.HumanDesign" Version="0.2.0" />
-    <PackageReference Include="SharpAstrology.Base" Version="0.5.0" />
-    <!-- 引入你发现的精美图表 Blazor 组件库 -->
-    <!-- 注意：请根据 GitHub 上的实际版本号调整 Version -->
+    <!-- 升级至 0.7.0 和 0.8.0 以兼容 BlazorComponents -->
+    <PackageReference Include="SharpAstrology.HumanDesign" Version="0.7.0" />
+    <PackageReference Include="SharpAstrology.Base" Version="0.8.0" />
     <PackageReference Include="SharpAstrology.HumanDesign.BlazorComponents" Version="0.1.0" />
   </ItemGroup>
 </Project>
