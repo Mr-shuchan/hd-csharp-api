@@ -23,7 +23,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Memory Loaded Engine)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Engine Path Fixed)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -43,7 +43,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => chartInterfaceType.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
         if (concreteChartType == null) throw new Exception("无法找到具体的排盘类！");
 
-        // 3. 【核心修复】：打破懒加载，强制将星历表引擎程序集读入内存
+        // 3. 打破懒加载，强制加载星历表引擎程序集
         try {
             System.Reflection.Assembly.Load("SharpAstrology.SwissEph");
         } catch (Exception ex) {
@@ -59,21 +59,26 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => ephInterface != null && ephInterface.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
 
         if (concreteEphType == null) {
-            throw new Exception("扫描内存失败：仍然缺少星历表引擎具体实现类。请确认 AstrologyAPI.csproj 中是否添加了 SharpAstrology.SwissEph。");
+            throw new Exception("缺少星历表引擎具体实现类。请确认 AstrologyAPI.csproj 中包含了 SharpAstrology.SwissEph。");
         }
 
-        // 4. 【核心修复】：智能适配带参数的引擎构造函数
+        // 4. 【核心修复】：精准定位带有 string 参数的构造函数，并喂给它一个合法的文件夹路径
         object ephInstance;
         try {
-            var ephCtor = concreteEphType.GetConstructors().FirstOrDefault();
-            // 如果构造函数要求传一个 string (通常是本地星历数据文件夹的路径)
-            if (ephCtor != null && ephCtor.GetParameters().Length == 1 && ephCtor.GetParameters()[0].ParameterType == typeof(string)) {
-                ephInstance = Activator.CreateInstance(concreteEphType, ""); // 先传空路径，依赖库可能内嵌了基础数据
+            var stringCtor = concreteEphType.GetConstructor(new[] { typeof(string) });
+            if (stringCtor != null) {
+                // 在服务器运行时目录下创建一个空的星历表文件夹，防止引擎因路径不存在而报错
+                string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
+                if (!System.IO.Directory.Exists(ephPath)) {
+                    System.IO.Directory.CreateDirectory(ephPath);
+                }
+                ephInstance = Activator.CreateInstance(concreteEphType, ephPath);
             } else {
                 ephInstance = Activator.CreateInstance(concreteEphType);
             }
         } catch (Exception ex) {
-            throw new Exception($"星历表计算引擎启动失败。报错详情: {ex.InnerException?.Message ?? ex.Message}");
+            var ctors = concreteEphType.GetConstructors().Select(c => "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name)) + ")");
+            throw new Exception($"星历表计算引擎启动失败。目标引擎: {concreteEphType.Name}。可用构造: {string.Join(" | ", ctors)}。报错详情: {ex.InnerException?.Message ?? ex.Message}");
         }
 
         // 5. 查找计算模式枚举
