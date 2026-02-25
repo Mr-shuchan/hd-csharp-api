@@ -5,9 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 升级至 0.7.0 和 0.8.0 以兼容 BlazorComponents -->
     <PackageReference Include="SharpAstrology.HumanDesign" Version="0.7.0" />
     <PackageReference Include="SharpAstrology.Base" Version="0.8.0" />
+    <!-- 【新增】强制挂载星历表天文计算物理引擎 -->
+    <PackageReference Include="SharpAstrology.SwissEph" Version="0.8.0" />
     <PackageReference Include="SharpAstrology.HumanDesign.BlazorComponents" Version="0.1.0" />
   </ItemGroup>
 </Project>
