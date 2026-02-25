@@ -23,7 +23,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Engine Path Fixed)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Engine Auto-Binder Fixed)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -47,7 +47,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         try {
             System.Reflection.Assembly.Load("SharpAstrology.SwissEph");
         } catch (Exception ex) {
-            Console.WriteLine("强制加载星历表引擎程序集失败: " + ex.Message);
+            Console.WriteLine("强制加载程序集失败: " + ex.Message);
         }
 
         var ephInterface = AppDomain.CurrentDomain.GetAssemblies()
@@ -59,26 +59,28 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => ephInterface != null && ephInterface.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
 
         if (concreteEphType == null) {
-            throw new Exception("缺少星历表引擎具体实现类。请确认 AstrologyAPI.csproj 中包含了 SharpAstrology.SwissEph。");
+            throw new Exception("缺少星历表引擎。请确认 AstrologyAPI.csproj 包含了 SharpAstrology.SwissEph。");
         }
 
-        // 4. 【核心修复】：精准定位带有 string 参数的构造函数，并喂给它一个合法的文件夹路径
+        // 4. 【核心修复】：暴力智能装载星历表引擎
         object ephInstance;
+        string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
+        if (!System.IO.Directory.Exists(ephPath)) {
+            System.IO.Directory.CreateDirectory(ephPath);
+        }
+
         try {
-            var stringCtor = concreteEphType.GetConstructor(new[] { typeof(string) });
-            if (stringCtor != null) {
-                // 在服务器运行时目录下创建一个空的星历表文件夹，防止引擎因路径不存在而报错
-                string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
-                if (!System.IO.Directory.Exists(ephPath)) {
-                    System.IO.Directory.CreateDirectory(ephPath);
-                }
-                ephInstance = Activator.CreateInstance(concreteEphType, ephPath);
-            } else {
+            // 第一顺位：不检查参数签名，强行将路径喂给引擎装载器，让底层的 Binder 自己去匹配（无视默认参数干扰）
+            ephInstance = Activator.CreateInstance(concreteEphType, ephPath);
+        } 
+        catch {
+            try {
+                // 第二顺位兜底：尝试无参构造
                 ephInstance = Activator.CreateInstance(concreteEphType);
+            } catch (Exception innerEx) {
+                var ctors = concreteEphType.GetConstructors().Select(c => "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name)) + ")");
+                throw new Exception($"星历表引擎 {concreteEphType.Name} 暴力装载彻底失败。可用构造: {string.Join(" | ", ctors)}。内部报错: {innerEx.InnerException?.Message ?? innerEx.Message}");
             }
-        } catch (Exception ex) {
-            var ctors = concreteEphType.GetConstructors().Select(c => "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name)) + ")");
-            throw new Exception($"星历表计算引擎启动失败。目标引擎: {concreteEphType.Name}。可用构造: {string.Join(" | ", ctors)}。报错详情: {ex.InnerException?.Message ?? ex.Message}");
         }
 
         // 5. 查找计算模式枚举
@@ -91,14 +93,15 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         // 6. 实例化排盘对象
         object chartInstance;
         try {
-            // 目前依然用测试时间进行渲染连通性测试
+            // 解析用户传来的时间 (需要将前端传来的时间格式化为正确的 DateTime)
+            // 这里我们先用硬编码时间测试连通性，跑通后你再替换为真实的 data.Date 解析
             var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
             chartInstance = Activator.CreateInstance(concreteChartType, parsedDate, ephInstance, modeValue);
         } catch (Exception ex) {
             throw new Exception($"传入参数实例化排盘实体失败。报错详情: {ex.InnerException?.Message ?? ex.Message}");
         }
 
-        // 7. 将生成的实例丢给 Blazor 渲染精美图表
+        // 7. 渲染精美图表
         var chartHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () =>
         {
             var dictionary = new Dictionary<string, object> { { chartProp.Name, chartInstance } };
