@@ -6,7 +6,8 @@
 
   <ItemGroup>
     <PackageReference Include="SharpAstrology.HumanDesign" Version="0.7.0" />
-    <PackageReference Include="SharpAstrology.Base" Version="0.8.0" />
+    <!-- 【修正】升级至 0.11.0 以满足 SwissEph 0.3.1 的底层依赖要求 -->
+    <PackageReference Include="SharpAstrology.Base" Version="0.11.0" />
     <!-- 【修正】使用 NuGet 存在的正确版本号 0.3.1 -->
     <PackageReference Include="SharpAstrology.SwissEph" Version="0.3.1" />
     <PackageReference Include="SharpAstrology.HumanDesign.BlazorComponents" Version="0.1.0" />
