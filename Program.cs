@@ -23,7 +23,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Engine Auto-Binder Fixed)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Ultimate Binder Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -43,7 +43,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => chartInterfaceType.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
         if (concreteChartType == null) throw new Exception("无法找到具体的排盘类！");
 
-        // 3. 打破懒加载，强制加载星历表引擎程序集
+        // 3. 强制加载星历表引擎程序集
         try {
             System.Reflection.Assembly.Load("SharpAstrology.SwissEph");
         } catch (Exception ex) {
@@ -62,25 +62,44 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             throw new Exception("缺少星历表引擎。请确认 AstrologyAPI.csproj 包含了 SharpAstrology.SwissEph。");
         }
 
-        // 4. 【核心修复】：暴力智能装载星历表引擎
-        object ephInstance;
+        // 4. 【核心修复】：终极参数解构构造器 (完美兼容带默认值的可选参数)
+        object ephInstance = null;
         string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
         if (!System.IO.Directory.Exists(ephPath)) {
             System.IO.Directory.CreateDirectory(ephPath);
         }
 
-        try {
-            // 第一顺位：不检查参数签名，强行将路径喂给引擎装载器，让底层的 Binder 自己去匹配（无视默认参数干扰）
-            ephInstance = Activator.CreateInstance(concreteEphType, ephPath);
-        } 
-        catch {
+        var ctors = concreteEphType.GetConstructors();
+        if (ctors.Length == 0) throw new Exception($"引擎 {concreteEphType.Name} 没有公开的构造函数！");
+
+        Exception lastCtorError = null;
+        foreach (var ctor in ctors) {
             try {
-                // 第二顺位兜底：尝试无参构造
-                ephInstance = Activator.CreateInstance(concreteEphType);
-            } catch (Exception innerEx) {
-                var ctors = concreteEphType.GetConstructors().Select(c => "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name)) + ")");
-                throw new Exception($"星历表引擎 {concreteEphType.Name} 暴力装载彻底失败。可用构造: {string.Join(" | ", ctors)}。内部报错: {innerEx.InnerException?.Message ?? innerEx.Message}");
+                var pInfos = ctor.GetParameters();
+                var argsToPass = new object[pInfos.Length];
+                
+                for (int i = 0; i < pInfos.Length; i++) {
+                    if (pInfos[i].ParameterType == typeof(string)) {
+                        argsToPass[i] = ephPath; // 遇到字符串，无脑塞入路径
+                    } else if (pInfos[i].HasDefaultValue) {
+                        argsToPass[i] = pInfos[i].DefaultValue; // 提取并塞入默认参数
+                    } else if (pInfos[i].ParameterType.IsValueType) {
+                        argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType); // 值类型给默认值
+                    } else {
+                        argsToPass[i] = null; // 引用类型给 null
+                    }
+                }
+                
+                // 使用完美对齐的参数数组直接调用构造函数
+                ephInstance = ctor.Invoke(argsToPass);
+                break; // 如果成功，立刻跳出循环
+            } catch (Exception ex) {
+                lastCtorError = ex;
             }
+        }
+
+        if (ephInstance == null) {
+            throw new Exception($"装载引擎彻底失败。最后一个报错: {lastCtorError?.InnerException?.Message ?? lastCtorError?.Message}");
         }
 
         // 5. 查找计算模式枚举
@@ -93,8 +112,6 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         // 6. 实例化排盘对象
         object chartInstance;
         try {
-            // 解析用户传来的时间 (需要将前端传来的时间格式化为正确的 DateTime)
-            // 这里我们先用硬编码时间测试连通性，跑通后你再替换为真实的 data.Date 解析
             var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
             chartInstance = Activator.CreateInstance(concreteChartType, parsedDate, ephInstance, modeValue);
         } catch (Exception ex) {
