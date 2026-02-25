@@ -11,52 +11,60 @@ using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. 配置跨域，允许你的 Vue 前端访问
+// 配置跨域
 builder.Services.AddCors(options => {
     options.AddDefaultPolicy(policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
 });
 
-// 2. 注入 Blazor 服务端渲染所需的服务
+// 注入基础服务
 builder.Services.AddLogging();
 builder.Services.AddRazorComponents();
-builder.Services.AddLocalization(); // 防止组件缺少多语言服务报错
+builder.Services.AddLocalization(); 
 
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Reflection Mode Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Smart Reflection Mode Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
     try {
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
         
-        // 【核心黑科技】：使用反射动态获取组件需要的图表参数类型
+        // 1. 获取组件及需要的参数类型 (IHumanDesignChart)
         var componentType = typeof(HumanDesignGraph);
         var chartProp = componentType.GetProperty("Chart") ?? 
                         componentType.GetProperties().FirstOrDefault(p => p.Name.Contains("Chart"));
                         
-        if (chartProp == null) {
-            throw new Exception("在组件中找不到 Chart 属性。可用的属性有: " + string.Join(", ", componentType.GetProperties().Select(p => p.Name)));
-        }
+        if (chartProp == null) throw new Exception("在组件中找不到 Chart 属性。");
 
-        var chartType = chartProp.PropertyType;
-        object chartInstance;
+        var chartInterfaceType = chartProp.PropertyType;
         
-        try {
-            // 动态创建这个对象，绕过编译期的硬编码检查
-            var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-            chartInstance = Activator.CreateInstance(chartType, parsedDate);
-        } catch (Exception ex) {
-            // 如果缺少依赖(比如星历表)，这里会把需要的构造函数结构打印出来
-            var ctors = chartType.GetConstructors().Select(c => c.ToString());
-            throw new Exception($"无法实例化 {chartType.Name}。需要的构造函数: {string.Join(" | ", ctors)}。内部报错: {ex.Message}");
+        // 2. 【核心修复】：扫描所有加载的代码库，找到实现了该接口的具体类 (Class)
+        var concreteChartType = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(a => {
+                try { return a.GetTypes(); } 
+                catch { return Array.Empty<Type>(); }
+            })
+            .FirstOrDefault(t => chartInterfaceType.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
+
+        if (concreteChartType == null) {
+            throw new Exception($"严重错误：无法在依赖库中找到实现了 {chartInterfaceType.Name} 的具体排盘类！");
         }
 
-        // 渲染精美图表组件
+        // 3. 实例化具体的排盘类
+        object chartInstance;
+        try {
+            var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            chartInstance = Activator.CreateInstance(concreteChartType, parsedDate);
+        } catch (Exception ex) {
+            var ctors = concreteChartType.GetConstructors().Select(c => c.ToString());
+            throw new Exception($"找到具体类 {concreteChartType.FullName}，但其实例化失败。需要的构造函数: {string.Join(" | ", ctors)}。报错详情: {ex.InnerException?.Message ?? ex.Message}");
+        }
+
+        // 4. 将生成的实例丢给 Blazor 渲染精美图表
         var chartHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () =>
         {
-            // 将动态创建好的 chart 对象传递给 Blazor 组件
             var dictionary = new Dictionary<string, object>
             {
                 { chartProp.Name, chartInstance } 
@@ -77,7 +85,6 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         });
     } 
     catch (Exception ex) {
-        // 将详尽的堆栈错误直接发给前端展示
         return Results.Json(new { success = false, message = ex.ToString() });
     }
 });
