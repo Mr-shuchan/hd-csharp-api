@@ -8,6 +8,7 @@ using SharpAstrology.HumanDesign.BlazorComponents;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Reflection; // 引入反射核心命名空间
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,7 +24,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Ultimate Binder Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Invincible Binder Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -45,7 +46,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
 
         // 3. 强制加载星历表引擎程序集
         try {
-            System.Reflection.Assembly.Load("SharpAstrology.SwissEph");
+            Assembly.Load("SharpAstrology.SwissEph");
         } catch (Exception ex) {
             Console.WriteLine("强制加载程序集失败: " + ex.Message);
         }
@@ -62,37 +63,38 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             throw new Exception("缺少星历表引擎。请确认 AstrologyAPI.csproj 包含了 SharpAstrology.SwissEph。");
         }
 
-        // 4. 【核心修复】：终极参数解构构造器 (完美兼容带默认值的可选参数)
+        // 4. 【终极修复】：无敌反射装载器，破解 Private/Internal 权限限制
         object ephInstance = null;
         string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
         if (!System.IO.Directory.Exists(ephPath)) {
             System.IO.Directory.CreateDirectory(ephPath);
         }
 
-        var ctors = concreteEphType.GetConstructors();
-        if (ctors.Length == 0) throw new Exception($"引擎 {concreteEphType.Name} 没有公开的构造函数！");
+        // 获取所有构造函数，无视其是否公开
+        var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var ctors = concreteEphType.GetConstructors(flags);
+        if (ctors.Length == 0) throw new Exception($"引擎 {concreteEphType.Name} 没有任何实例构造函数！");
 
         Exception lastCtorError = null;
-        foreach (var ctor in ctors) {
+        foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length)) {
             try {
                 var pInfos = ctor.GetParameters();
                 var argsToPass = new object[pInfos.Length];
                 
                 for (int i = 0; i < pInfos.Length; i++) {
                     if (pInfos[i].ParameterType == typeof(string)) {
-                        argsToPass[i] = ephPath; // 遇到字符串，无脑塞入路径
+                        argsToPass[i] = ephPath;
                     } else if (pInfos[i].HasDefaultValue) {
-                        argsToPass[i] = pInfos[i].DefaultValue; // 提取并塞入默认参数
+                        argsToPass[i] = pInfos[i].DefaultValue;
                     } else if (pInfos[i].ParameterType.IsValueType) {
-                        argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType); // 值类型给默认值
+                        argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType);
                     } else {
-                        argsToPass[i] = null; // 引用类型给 null
+                        argsToPass[i] = null;
                     }
                 }
                 
-                // 使用完美对齐的参数数组直接调用构造函数
                 ephInstance = ctor.Invoke(argsToPass);
-                break; // 如果成功，立刻跳出循环
+                break; // 只要有一个构造函数成功被破译并启动，立刻跳出
             } catch (Exception ex) {
                 lastCtorError = ex;
             }
@@ -109,13 +111,44 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
 
         var modeValue = modeEnum != null ? Enum.GetValues(modeEnum).GetValue(0) : 0;
 
-        // 6. 实例化排盘对象
-        object chartInstance;
-        try {
-            var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-            chartInstance = Activator.CreateInstance(concreteChartType, parsedDate, ephInstance, modeValue);
-        } catch (Exception ex) {
-            throw new Exception($"传入参数实例化排盘实体失败。报错详情: {ex.InnerException?.Message ?? ex.Message}");
+        // 6. 【同步修复】使用相同的无敌反射器来实例化排盘对象
+        object chartInstance = null;
+        var chartCtors = concreteChartType.GetConstructors(flags);
+        Exception chartCtorError = null;
+        
+        // 连通性测试时间
+        var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        foreach (var ctor in chartCtors.OrderByDescending(c => c.GetParameters().Length)) {
+            try {
+                var pInfos = ctor.GetParameters();
+                var argsToPass = new object[pInfos.Length];
+                
+                for (int i = 0; i < pInfos.Length; i++) {
+                    var pt = pInfos[i].ParameterType;
+                    if (pt == typeof(DateTime) || pt == typeof(DateTimeOffset)) {
+                        argsToPass[i] = parsedDate;
+                    } else if (ephInterface != null && ephInterface.IsAssignableFrom(pt)) {
+                        argsToPass[i] = ephInstance;
+                    } else if (modeEnum != null && pt == modeEnum) {
+                        argsToPass[i] = modeValue;
+                    } else if (pInfos[i].HasDefaultValue) {
+                        argsToPass[i] = pInfos[i].DefaultValue;
+                    } else if (pt.IsValueType) {
+                        argsToPass[i] = Activator.CreateInstance(pt);
+                    } else {
+                        argsToPass[i] = null;
+                    }
+                }
+                chartInstance = ctor.Invoke(argsToPass);
+                break;
+            } catch (Exception ex) {
+                chartCtorError = ex;
+            }
+        }
+
+        if (chartInstance == null) {
+            throw new Exception($"排盘实体实例化失败。最后报错: {chartCtorError?.InnerException?.Message ?? chartCtorError?.Message}");
         }
 
         // 7. 渲染精美图表
