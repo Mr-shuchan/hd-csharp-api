@@ -23,7 +23,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Ephemeris Engine Mounted)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Memory Loaded Engine)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -43,7 +43,13 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => chartInterfaceType.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
         if (concreteChartType == null) throw new Exception("无法找到具体的排盘类！");
 
-        // 3. 【核心修复】查找星历表引擎 (IEphemerides) 并启动它
+        // 3. 【核心修复】：打破懒加载，强制将星历表引擎程序集读入内存
+        try {
+            System.Reflection.Assembly.Load("SharpAstrology.SwissEph");
+        } catch (Exception ex) {
+            Console.WriteLine("强制加载星历表引擎程序集失败: " + ex.Message);
+        }
+
         var ephInterface = AppDomain.CurrentDomain.GetAssemblies()
             .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
             .FirstOrDefault(t => t.Name == "IEphemerides");
@@ -53,35 +59,41 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             .FirstOrDefault(t => ephInterface != null && ephInterface.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
 
         if (concreteEphType == null) {
-            throw new Exception("缺少星历表引擎！请检查 AstrologyAPI.csproj 中是否添加了 SharpAstrology.SwissEph 包。");
+            throw new Exception("扫描内存失败：仍然缺少星历表引擎具体实现类。请确认 AstrologyAPI.csproj 中是否添加了 SharpAstrology.SwissEph。");
         }
 
+        // 4. 【核心修复】：智能适配带参数的引擎构造函数
         object ephInstance;
         try {
-            ephInstance = Activator.CreateInstance(concreteEphType);
+            var ephCtor = concreteEphType.GetConstructors().FirstOrDefault();
+            // 如果构造函数要求传一个 string (通常是本地星历数据文件夹的路径)
+            if (ephCtor != null && ephCtor.GetParameters().Length == 1 && ephCtor.GetParameters()[0].ParameterType == typeof(string)) {
+                ephInstance = Activator.CreateInstance(concreteEphType, ""); // 先传空路径，依赖库可能内嵌了基础数据
+            } else {
+                ephInstance = Activator.CreateInstance(concreteEphType);
+            }
         } catch (Exception ex) {
             throw new Exception($"星历表计算引擎启动失败。报错详情: {ex.InnerException?.Message ?? ex.Message}");
         }
 
-        // 4. 【核心修复】查找计算模式枚举 (EphCalculationMode)
+        // 5. 查找计算模式枚举
         var modeEnum = AppDomain.CurrentDomain.GetAssemblies()
             .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
             .FirstOrDefault(t => t.Name == "EphCalculationMode" && t.IsEnum);
 
-        // 取枚举的默认值 (通常为0)
         var modeValue = modeEnum != null ? Enum.GetValues(modeEnum).GetValue(0) : 0;
 
-        // 5. 将“时间、引擎、计算模式”三个参数同时喂给构造函数进行完美排盘
+        // 6. 实例化排盘对象
         object chartInstance;
         try {
+            // 目前依然用测试时间进行渲染连通性测试
             var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-            // 完美匹配 Void .ctor(System.DateTime, IEphemerides, EphCalculationMode)
             chartInstance = Activator.CreateInstance(concreteChartType, parsedDate, ephInstance, modeValue);
         } catch (Exception ex) {
             throw new Exception($"传入参数实例化排盘实体失败。报错详情: {ex.InnerException?.Message ?? ex.Message}");
         }
 
-        // 6. 将生成的实例丢给 Blazor 渲染精美图表
+        // 7. 将生成的实例丢给 Blazor 渲染精美图表
         var chartHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () =>
         {
             var dictionary = new Dictionary<string, object> { { chartProp.Name, chartInstance } };
