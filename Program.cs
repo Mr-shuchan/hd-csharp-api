@@ -24,7 +24,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Invincible Binder Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Ultimate StackTrace Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -119,7 +119,8 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         // 连通性测试时间
         var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
 
-        foreach (var ctor in chartCtors.OrderByDescending(c => c.GetParameters().Length)) {
+        // 【修改点】：从参数最少的简单构造函数开始尝试，并填补字符串空值
+        foreach (var ctor in chartCtors.OrderBy(c => c.GetParameters().Length)) {
             try {
                 var pInfos = ctor.GetParameters();
                 var argsToPass = new object[pInfos.Length];
@@ -134,6 +135,8 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                         argsToPass[i] = modeValue;
                     } else if (pInfos[i].HasDefaultValue) {
                         argsToPass[i] = pInfos[i].DefaultValue;
+                    } else if (pt == typeof(string)) {
+                        argsToPass[i] = ""; // 字符串给空串，避免引发内部空指针
                     } else if (pt.IsValueType) {
                         argsToPass[i] = Activator.CreateInstance(pt);
                     } else {
@@ -148,7 +151,8 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         }
 
         if (chartInstance == null) {
-            throw new Exception($"排盘实体实例化失败。最后报错: {chartCtorError?.InnerException?.Message ?? chartCtorError?.Message}");
+            // 【核心修改】：将 InnerException 的完整 ToString 抛出，展示最底层的崩溃行号！
+            throw new Exception($"排盘实体实例化失败。\n底层完整堆栈:\n{chartCtorError?.InnerException?.ToString() ?? chartCtorError?.ToString()}");
         }
 
         // 7. 渲染精美图表
