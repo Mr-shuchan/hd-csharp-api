@@ -34,18 +34,16 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Moshier Math Mode & Custom Authority Engine)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Planets Columns Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
         string ephPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
         if (!Directory.Exists(ephPath)) Directory.CreateDirectory(ephPath);
         
-        // 星历引擎反射装载器
         Type ephType = typeof(SwissEphemerides);
         Type ephTypeEnum = AppDomain.CurrentDomain.GetAssemblies().SelectMany(a => a.GetTypes()).FirstOrDefault(t => t.Name == "EphType" && t.IsEnum);
         
-        // 【终极破解 1】：强制获取 Moshier 模式，使用纯数学公式排盘，彻底杜绝文件加载失败导致的“全 0 度反映者”假盘 BUG！
         object moshierValue = null;
         if (ephTypeEnum != null) {
             try { moshierValue = Enum.Parse(ephTypeEnum, "Moshier", true); } catch {}
@@ -64,7 +62,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                         try { argsToPass[i] = Activator.CreateInstance(pt, ephPath); } 
                         catch { argsToPass[i] = Activator.CreateInstance(pt); }
                     } else if (ephTypeEnum != null && pt == ephTypeEnum && moshierValue != null) {
-                        argsToPass[i] = moshierValue; // 注入数学模式
+                        argsToPass[i] = moshierValue; 
                     } else if (pt == typeof(string)) {
                         argsToPass[i] = ephPath;
                     } else if (pt.Name.Contains("ILogger")) {
@@ -86,7 +84,6 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         if (ephInstance == null) throw new Exception("无法反射实例化 SwissEphemerides");
         IEphemerides eph = (IEphemerides)ephInstance;
         
-        // 解析前端传来的准确 UTC 时间
         DateTime parsedDate;
         if (!DateTime.TryParse($"{data.Date} {data.Time}", out parsedDate)) {
             parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -94,11 +91,8 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             parsedDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
         }
         
-        // 生成真实的人类图数据
         var chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
 
-        // 【终极破解 2】：手动计算内在权威 (Authority)
-        // 既然作者没写这个属性，我们就根据定义中心 (ConnectedComponents) 自行推导权威！
         var ccProp = chart.GetType().GetProperty("ConnectedComponents");
         var ccDict = ccProp?.GetValue(chart) as System.Collections.IDictionary;
         var definedCenters = new HashSet<string>();
@@ -119,7 +113,34 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             catch { return "未知"; }
         }
 
-        // 渲染图表组件
+        // =================================================================================
+        // 【终极更新】：提取左右两侧的红黑星历数据 (闸门与爻线)
+        // =================================================================================
+        var pActProp = chart.GetType().GetProperty("PersonalityActivation");
+        var dActProp = chart.GetType().GetProperty("DesignActivation");
+        
+        var getActivationList = new Func<System.Collections.IDictionary, List<object>>(dict => {
+            var list = new List<object>();
+            if (dict == null) return list;
+            // 人类图标准十二行星排列顺序
+            string[] order = { "Sun", "Earth", "NorthNode", "SouthNode", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto" };
+            foreach(var p in order) {
+                foreach (System.Collections.DictionaryEntry kvp in dict) {
+                    if (kvp.Key.ToString() == p) {
+                        var act = kvp.Value;
+                        // 提取闸门和爻线的整数值
+                        int gateInt = Convert.ToInt32(act.GetType().GetProperty("Gate")?.GetValue(act));
+                        int lineInt = Convert.ToInt32(act.GetType().GetProperty("Line")?.GetValue(act));
+                        list.Add(new { planet = p, gate = gateInt, line = lineInt });
+                    }
+                }
+            }
+            return list;
+        });
+
+        var personalityPlanets = getActivationList(pActProp?.GetValue(chart) as System.Collections.IDictionary);
+        var designPlanets = getActivationList(dActProp?.GetValue(chart) as System.Collections.IDictionary);
+
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
         var renderedHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () => 
         {
@@ -137,8 +158,10 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                 type = GetProp("Type"),
                 profile = GetProp("Profile").Replace("_", "/"),
                 definition = GetProp("SplitDefinition"),
-                authority = rawAuth, // 注入我们自己算出的精确权威
+                authority = rawAuth,
                 cross = GetProp("IncarnationCross"),
+                personalityActivations = personalityPlanets, // 输出黑色显意识列表
+                designActivations = designPlanets,         // 输出红色潜意识列表
                 chartImageSVG = renderedHtmlString
             }
         });
