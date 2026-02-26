@@ -34,7 +34,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (SwissEph Core Injected)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Dispatcher Thread Fixed)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
@@ -73,7 +73,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                     var pt = pInfos[i].ParameterType;
                     
                     if (pt.Name == "SwissEph") {
-                        // 【终极解密】：动态创建底层的 SwissEph 核心对象，并将路径喂给它
+                        // 动态创建底层的 SwissEph 核心对象，并将路径喂给它
                         try {
                             argsToPass[i] = Activator.CreateInstance(pt, ephPath);
                         } catch {
@@ -124,18 +124,22 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             throw new Exception($"引擎排盘计算空指针崩溃！\n【引擎参数字典】: {sigs}\n内部报错: {chartEx.Message}\n堆栈: {chartEx.StackTrace}");
         }
 
-        // 6. 渲染 Blazor 精美图表组件
+        // 6. 【核心修复】：渲染 Blazor 精美图表组件 (确保在 Dispatcher 线程中执行)
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
-        var dictionary = new Dictionary<string, object> { { "Chart", chart } };
         
-        var parameters = Microsoft.AspNetCore.Components.ParameterView.FromDictionary(dictionary);
-        var output = await htmlRenderer.RenderComponentAsync<HumanDesignGraph>(parameters);
+        var renderedHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () => 
+        {
+            var dictionary = new Dictionary<string, object> { { "Chart", chart } };
+            var parameters = Microsoft.AspNetCore.Components.ParameterView.FromDictionary(dictionary);
+            var output = await htmlRenderer.RenderComponentAsync<HumanDesignGraph>(parameters);
+            return output.ToHtmlString();
+        });
 
         return Results.Json(new {
             success = true,
             data = new {
                 name = data.Name,
-                chartImageSVG = output.ToHtmlString()
+                chartImageSVG = renderedHtmlString
             }
         });
     } 
