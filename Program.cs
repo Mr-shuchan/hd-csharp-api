@@ -34,7 +34,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (DI-Injected Engine Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (SwissEph Core Injected)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
@@ -60,7 +60,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             }
         }
 
-        // 3. 星历引擎反射装载器 (融合依赖注入 DI 填补 ILogger 空指针)
+        // 3. 星历引擎反射装载器 (融合 SwissEph 底层套娃解析)
         Type ephType = typeof(SwissEphemerides);
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         object ephInstance = null;
@@ -71,14 +71,20 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                 var argsToPass = new object[pInfos.Length];
                 for (int i = 0; i < pInfos.Length; i++) {
                     var pt = pInfos[i].ParameterType;
-                    if (pt == typeof(string)) {
+                    
+                    if (pt.Name == "SwissEph") {
+                        // 【终极解密】：动态创建底层的 SwissEph 核心对象，并将路径喂给它
+                        try {
+                            argsToPass[i] = Activator.CreateInstance(pt, ephPath);
+                        } catch {
+                            argsToPass[i] = Activator.CreateInstance(pt); // 兜底无参构造，依靠全局环境变量
+                        }
+                    } else if (pt == typeof(string)) {
                         argsToPass[i] = ephPath;
                     } else if (pt.Name.Contains("ILogger")) {
-                        // 动态注入 ILogger，防止底层计算时试图打日志而触发空指针
                         var loggerType = typeof(ILogger<>).MakeGenericType(ephType);
                         argsToPass[i] = services.GetService(loggerType) ?? loggerFactory.CreateLogger(ephType.Name);
                     } else {
-                        // 从 DI 容器解析其他未知依赖
                         var svc = services.GetService(pt);
                         if (svc != null) {
                             argsToPass[i] = svc;
@@ -112,7 +118,6 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         try {
             chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
         } catch (Exception chartEx) {
-            // 【超级侦探】：如果再次抛出空指针，这里会打印出引擎所需的真实构造参数签名！
             var sigs = string.Join(" | ", ephType.GetConstructors(flags).Select(c => 
                 "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name)) + ")"
             ));
