@@ -4,11 +4,14 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Logging;
+
+// 引入全套官方命名空间
 using SharpAstrology.DataModels;
 using SharpAstrology.Interfaces;
 using SharpAstrology.Enums;
 using SharpAstrology.Ephemerides;
 using SharpAstrology.HumanDesign.BlazorComponents;
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -18,7 +21,12 @@ using System.Linq;
 using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+
+// 配置跨域
+builder.Services.AddCors(options => {
+    options.AddDefaultPolicy(policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+});
+
 builder.Services.AddLogging();
 builder.Services.AddRazorComponents();
 builder.Services.AddLocalization(); 
@@ -26,28 +34,26 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
+app.MapGet("/", () => "C# SharpAstrology API is running! (Moshier Math Mode & Custom Authority Engine)");
+
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
         string ephPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
         if (!Directory.Exists(ephPath)) Directory.CreateDirectory(ephPath);
-        Environment.SetEnvironmentVariable("SE_EPHE_PATH", ephPath);
         
-        string[] ephFiles = { "seas_18.se1", "semo_18.se1", "sepl_18.se1" };
-        using (var client = new HttpClient()) {
-            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0"); 
-            foreach (var f in ephFiles) {
-                var p = Path.Combine(ephPath, f);
-                if (!File.Exists(p) || new FileInfo(p).Length < 100000) {
-                    string cleanUrl = "https://" + "cdn.jsdelivr.net/gh/aloistr/swisseph@master/ephe/" + f;
-                    var bytes = await client.GetByteArrayAsync(cleanUrl);
-                    File.WriteAllBytes(p, bytes);
-                }
-            }
-        }
-
+        // 星历引擎反射装载器
         Type ephType = typeof(SwissEphemerides);
+        Type ephTypeEnum = AppDomain.CurrentDomain.GetAssemblies().SelectMany(a => a.GetTypes()).FirstOrDefault(t => t.Name == "EphType" && t.IsEnum);
+        
+        // 【终极破解 1】：强制获取 Moshier 模式，使用纯数学公式排盘，彻底杜绝文件加载失败导致的“全 0 度反映者”假盘 BUG！
+        object moshierValue = null;
+        if (ephTypeEnum != null) {
+            try { moshierValue = Enum.Parse(ephTypeEnum, "Moshier", true); } catch {}
+        }
+        
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         object ephInstance = null;
+        
         foreach (var ctor in ephType.GetConstructors(flags).OrderByDescending(c => c.GetParameters().Length)) {
             try {
                 var pInfos = ctor.GetParameters();
@@ -57,7 +63,10 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                     if (pt.Name == "SwissEph") {
                         try { argsToPass[i] = Activator.CreateInstance(pt, ephPath); } 
                         catch { argsToPass[i] = Activator.CreateInstance(pt); }
-                    } else if (pt == typeof(string)) { argsToPass[i] = ephPath;
+                    } else if (ephTypeEnum != null && pt == ephTypeEnum && moshierValue != null) {
+                        argsToPass[i] = moshierValue; // 注入数学模式
+                    } else if (pt == typeof(string)) {
+                        argsToPass[i] = ephPath;
                     } else if (pt.Name.Contains("ILogger")) {
                         var loggerType = typeof(ILogger<>).MakeGenericType(ephType);
                         argsToPass[i] = services.GetService(loggerType) ?? loggerFactory.CreateLogger(ephType.Name);
@@ -77,6 +86,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         if (ephInstance == null) throw new Exception("无法反射实例化 SwissEphemerides");
         IEphemerides eph = (IEphemerides)ephInstance;
         
+        // 解析前端传来的准确 UTC 时间
         DateTime parsedDate;
         if (!DateTime.TryParse($"{data.Date} {data.Time}", out parsedDate)) {
             parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -84,21 +94,32 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             parsedDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
         }
         
+        // 生成真实的人类图数据
         var chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
 
-        // 【超级诊断器】：强制获取所有属性！看看权威和定义到底被作者改成了什么名字！
-        var debugProps = new Dictionary<string, string>();
-        foreach (var p in chart.GetType().GetProperties()) {
-            try { debugProps[p.Name] = p.GetValue(chart)?.ToString() ?? "null"; } catch {}
+        // 【终极破解 2】：手动计算内在权威 (Authority)
+        // 既然作者没写这个属性，我们就根据定义中心 (ConnectedComponents) 自行推导权威！
+        var ccProp = chart.GetType().GetProperty("ConnectedComponents");
+        var ccDict = ccProp?.GetValue(chart) as System.Collections.IDictionary;
+        var definedCenters = new HashSet<string>();
+        if (ccDict != null) {
+            foreach (var key in ccDict.Keys) definedCenters.Add(key.ToString());
         }
-        
-        // 智能模糊匹配多个可能的属性名
-        var rawType = debugProps.GetValueOrDefault("Type", "未知");
-        var rawProfile = debugProps.GetValueOrDefault("Profile", "未知");
-        var rawAuth = debugProps.GetValueOrDefault("Authority", debugProps.GetValueOrDefault("InnerAuthority", "未知"));
-        var rawDef = debugProps.GetValueOrDefault("Definition", debugProps.GetValueOrDefault("SplitDefinition", "未知"));
-        var rawCross = debugProps.GetValueOrDefault("IncarnationCross", "未知");
 
+        string rawAuth = "Lunar";
+        if (definedCenters.Contains("SolarPlexus") || definedCenters.Contains("Solar")) rawAuth = "Emotional";
+        else if (definedCenters.Contains("Sacral")) rawAuth = "Sacral";
+        else if (definedCenters.Contains("Spleen")) rawAuth = "Splenic";
+        else if (definedCenters.Contains("Heart") || definedCenters.Contains("Ego")) rawAuth = "Ego";
+        else if (definedCenters.Contains("G")) rawAuth = "SelfProjected";
+        else if (definedCenters.Contains("Head") || definedCenters.Contains("Ajna") || definedCenters.Contains("Throat")) rawAuth = "Mental";
+
+        string GetProp(string propName) {
+            try { return chart.GetType().GetProperty(propName)?.GetValue(chart)?.ToString() ?? "未知"; } 
+            catch { return "未知"; }
+        }
+
+        // 渲染图表组件
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
         var renderedHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () => 
         {
@@ -113,20 +134,26 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             data = new {
                 name = data.Name,
                 location = $"{data.Province} {data.City}".Trim(),
-                parsedDateTime = parsedDate.ToString("yyyy-MM-dd HH:mm:ss"), // 把后端真实计算时间传给前端对账
-                rawDebugProps = debugProps, // 抛出字典
-                type = rawType,
-                profile = rawProfile.Replace("_", "/"),
-                definition = rawDef,
-                authority = rawAuth,
-                cross = rawCross,
+                type = GetProp("Type"),
+                profile = GetProp("Profile").Replace("_", "/"),
+                definition = GetProp("SplitDefinition"),
+                authority = rawAuth, // 注入我们自己算出的精确权威
+                cross = GetProp("IncarnationCross"),
                 chartImageSVG = renderedHtmlString
             }
         });
     } 
     catch (Exception ex) {
-        return Results.Json(new { success = false, message = "底层完整堆栈:\n" + ex.ToString() });
+        return Results.Json(new { success = false, message = "底层堆栈:\n" + ex.ToString() });
     }
 });
+
 app.Run();
-public class InputData { public string Name { get; set; } public string Date { get; set; } public string Time { get; set; } public string Province { get; set; } public string City { get; set; } }
+
+public class InputData {
+    public string Name { get; set; }
+    public string Date { get; set; }
+    public string Time { get; set; }
+    public string Province { get; set; }
+    public string City { get; set; }
+}
