@@ -32,7 +32,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Hybrid Auto-Binder Mode)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (EnvVar Engine Mode)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
@@ -41,7 +41,10 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             Directory.CreateDirectory(ephPath);
         }
         
-        // 1. 自动下载必需星历文件 (防止内部算盘报错 NullReferenceException)
+        // 【核心黑科技】：设置全局环境变量。底层 C 语言核心库会无条件读取这个路径寻找星历文件！
+        Environment.SetEnvironmentVariable("SE_EPHE_PATH", ephPath);
+        
+        // 1. 自动下载必需星历文件
         string[] ephFiles = { "seas_18.se1", "semo_18.se1", "sepl_18.se1" };
         using (var client = new HttpClient()) {
             foreach (var f in ephFiles) {
@@ -59,13 +62,13 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             }
         }
 
-        // 2. 防 Trim 技术：强引用类型，告诉编译器保留 DLL
+        // 2. 防 Trim 技术 + 无敌反射装载引擎
         Type ephType = typeof(SwissEphemerides);
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         var ephCtors = ephType.GetConstructors(flags);
 
-        // 使用无敌反射器绕过 CS1729 严格参数检查
         object ephInstance = null;
+        Exception ephErr = null;
         foreach (var ctor in ephCtors.OrderByDescending(c => c.GetParameters().Length)) {
             try {
                 var pInfos = ctor.GetParameters();
@@ -78,40 +81,50 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                 }
                 ephInstance = ctor.Invoke(argsToPass);
                 break;
-            } catch {}
+            } catch (Exception ex) { ephErr = ex; }
         }
-        if (ephInstance == null) throw new Exception("星历引擎反射装载彻底失败。");
+        if (ephInstance == null) throw new Exception($"星历引擎反射装载失败: {ephErr?.InnerException?.Message}");
 
-        // 3. 实例化人类图：绕过 CS0117 枚举名称缺失检查
+        // 3. 实例化人类图
         Type chartType = typeof(HumanDesignChart);
         var chartCtors = chartType.GetConstructors(flags);
         object chartInstance = null;
+        Exception lastChartErr = null;
         
-        // 目前先用测试时间验证渲染
         var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
         
-        // 关键：不写死具体的 Enum 名字，直接用 default 传递首个有效枚举值
-        EphCalculationMode modeValue = default; 
+        // 【核心修复】：遍历所有可用的枚举模式，而不仅是 default
+        var modeValues = Enum.GetValues(typeof(EphCalculationMode)).Cast<object>().ToList();
 
-        foreach (var ctor in chartCtors.OrderBy(c => c.GetParameters().Length)) {
-            try {
-                var pInfos = ctor.GetParameters();
-                var argsToPass = new object[pInfos.Length];
-                for (int i = 0; i < pInfos.Length; i++) {
-                    var pt = pInfos[i].ParameterType;
-                    if (pt == typeof(DateTime) || pt == typeof(DateTimeOffset)) argsToPass[i] = parsedDate;
-                    else if (typeof(IEphemerides).IsAssignableFrom(pt)) argsToPass[i] = ephInstance;
-                    else if (pt == typeof(EphCalculationMode)) argsToPass[i] = modeValue;
-                    else if (pInfos[i].HasDefaultValue) argsToPass[i] = pInfos[i].DefaultValue;
-                    else if (pt == typeof(string)) argsToPass[i] = "";
-                    else if (pt.IsValueType) argsToPass[i] = Activator.CreateInstance(pt);
-                    else argsToPass[i] = null;
+        foreach (var modeVal in modeValues) {
+            foreach (var ctor in chartCtors.OrderByDescending(c => c.GetParameters().Length)) {
+                try {
+                    var pInfos = ctor.GetParameters();
+                    var argsToPass = new object[pInfos.Length];
+                    for (int i = 0; i < pInfos.Length; i++) {
+                        var pt = pInfos[i].ParameterType;
+                        if (pt == typeof(DateTime) || pt == typeof(DateTimeOffset)) argsToPass[i] = parsedDate;
+                        else if (typeof(IEphemerides).IsAssignableFrom(pt)) argsToPass[i] = ephInstance;
+                        else if (pt == typeof(EphCalculationMode)) argsToPass[i] = modeVal;
+                        else if (pInfos[i].HasDefaultValue) argsToPass[i] = pInfos[i].DefaultValue;
+                        else if (pt == typeof(string)) argsToPass[i] = "";
+                        else if (pt.IsValueType) argsToPass[i] = Activator.CreateInstance(pt);
+                        else argsToPass[i] = null;
+                    }
+                    chartInstance = ctor.Invoke(argsToPass);
+                    if (chartInstance != null) break;
+                } catch (Exception ex) {
+                    lastChartErr = ex;
                 }
-                chartInstance = ctor.Invoke(argsToPass);
-                break;
-            } catch {}
+            }
+            if (chartInstance != null) break;
         }
-        if (chartInstance == null) throw new Exception("排盘实体反射装载彻底失败。");
+
+        if (chartInstance == null) {
+            var modes = string.Join(", ", Enum.GetNames(typeof(EphCalculationMode)));
+            // 【核心抛出】：把最底层的报错完整抛出给前端！
+            throw new Exception($"排盘实体装载失败。\n可用模式: {modes}\n引擎加载状态: {ephInstance != null}\n底层完整堆栈:\n{lastChartErr?.InnerException?.ToString() ?? lastChartErr?.ToString()}");
+        }
 
         // 4. 渲染 Blazor 精美图表组件
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
@@ -128,7 +141,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         });
     } 
     catch (Exception ex) {
-        return Results.Json(new { success = false, message = "底层完整堆栈:\n" + ex.ToString() });
+        return Results.Json(new { success = false, message = "错误详情:\n" + ex.ToString() });
     }
 });
 
