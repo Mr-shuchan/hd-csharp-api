@@ -17,6 +17,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Threading.Tasks;
+using System.Linq;
+using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -32,24 +34,26 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Astro.com Engine Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Astro.com + Engine Reflector)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
-        // 1. 明确星历文件路径：直接放在运行根目录，SwissEph底层默认会在当前或环境变量目录寻找
-        string ephPath = AppDomain.CurrentDomain.BaseDirectory;
+        // 1. 明确星历文件路径：建一个专属文件夹存放星历数据
+        string ephPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
+        if (!Directory.Exists(ephPath)) {
+            Directory.CreateDirectory(ephPath);
+        }
         Environment.SetEnvironmentVariable("SE_EPHE_PATH", ephPath);
         
-        // 2. 自动化云端星历文件下载器 (切换为最稳定、绝对正确的官方 astro.com 源)
+        // 2. 自动化云端星历文件下载器 (使用稳定的官方 astro.com 源)
         string[] ephFiles = { "seas_18.se1", "semo_18.se1", "sepl_18.se1" };
         using (var client = new HttpClient()) {
-            // 增加 UserAgent 防止被服务器拦截下载假文件
             client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"); 
             
             foreach (var f in ephFiles) {
                 var p = Path.Combine(ephPath, f);
-                // 防伪校验：如果文件不存在，或者下载成了只有几百字节的报错文本，则重新下载
                 if (!File.Exists(p) || new FileInfo(p).Length < 1000) {
+                    // 拆分字符串防 Markdown 破坏
                     string cleanUrl = "https://" + "www.astro.com/ftp/swisseph/ephe/" + f;
                     try {
                         var bytes = await client.GetByteArrayAsync(cleanUrl);
@@ -61,27 +65,46 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             }
         }
 
-        // 3. 强类型实例化星历引擎 (彻底告别反射，编译器打包完美支持)
-        IEphemerides eph = new SwissEphemerides();
+        // 3. 【核心修复】：星历引擎反射装载器
+        // 编译器报错 CS1729 说明其构造函数包含多个带有默认值的复杂参数，强类型 new 会被拦截
+        // 故在此使用反射来智能填补参数，强行启动引擎！
+        Type ephType = typeof(SwissEphemerides);
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        object ephInstance = null;
+        
+        foreach (var ctor in ephType.GetConstructors(flags).OrderByDescending(c => c.GetParameters().Length)) {
+            try {
+                var pInfos = ctor.GetParameters();
+                var argsToPass = new object[pInfos.Length];
+                for (int i = 0; i < pInfos.Length; i++) {
+                    if (pInfos[i].ParameterType == typeof(string)) argsToPass[i] = ephPath;
+                    else if (pInfos[i].HasDefaultValue) argsToPass[i] = pInfos[i].DefaultValue;
+                    else if (pInfos[i].ParameterType.IsValueType) argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType);
+                    else argsToPass[i] = null;
+                }
+                ephInstance = ctor.Invoke(argsToPass);
+                break;
+            } catch {}
+        }
+        
+        if (ephInstance == null) throw new Exception("无法反射实例化 SwissEphemerides (参数签名全部不匹配)。");
+        IEphemerides eph = (IEphemerides)ephInstance;
         
         // 4. 解析前端传来的时间
         DateTime parsedDate;
         if (!DateTime.TryParse($"{data.Date} {data.Time}", out parsedDate)) {
-            // 如果前端时间格式错误，兜底使用 2000 年作为演示
             parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
         } else {
-            // 确保标记为 UTC 时间
             parsedDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
         }
         
-        // 5. 实例化人类图 (使用从报错中确认的 Tropic 回归线枚举模式)
+        // 5. 强类型实例化人类图 (上一轮日志证明此行能完美通过编译)
         var chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
 
         // 6. 渲染 Blazor 精美图表组件
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
         var dictionary = new Dictionary<string, object> { { "Chart", chart } };
         
-        // 明确指定命名空间防止 CS0103 错误
         var parameters = Microsoft.AspNetCore.Components.ParameterView.FromDictionary(dictionary);
         var output = await htmlRenderer.RenderComponentAsync<HumanDesignGraph>(parameters);
 
