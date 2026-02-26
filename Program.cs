@@ -34,7 +34,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Astro.com + Engine Reflector)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (jsDelivr CDN Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
@@ -45,29 +45,26 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         }
         Environment.SetEnvironmentVariable("SE_EPHE_PATH", ephPath);
         
-        // 2. 自动化云端星历文件下载器 (使用稳定的官方 astro.com 源)
+        // 2. 自动化云端星历文件下载器 (使用最稳定且不限流的 jsDelivr 开源 CDN 加速节点)
         string[] ephFiles = { "seas_18.se1", "semo_18.se1", "sepl_18.se1" };
         using (var client = new HttpClient()) {
             client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"); 
             
             foreach (var f in ephFiles) {
                 var p = Path.Combine(ephPath, f);
-                if (!File.Exists(p) || new FileInfo(p).Length < 1000) {
+                // 防伪校验：如果文件不存在，或者下载成了一个小体积的 404 文本 (真实的 se1 文件远大于 100KB)
+                if (!File.Exists(p) || new FileInfo(p).Length < 100000) {
                     // 拆分字符串防 Markdown 破坏
-                    string cleanUrl = "https://" + "www.astro.com/ftp/swisseph/ephe/" + f;
-                    try {
-                        var bytes = await client.GetByteArrayAsync(cleanUrl);
-                        File.WriteAllBytes(p, bytes);
-                    } catch (Exception ex) {
-                        Console.WriteLine($"文件 {f} 下载失败: {ex.Message}");
-                    }
+                    string cleanUrl = "https://" + "cdn.jsdelivr.net/gh/aloistr/swisseph@master/ephe/" + f;
+                    
+                    // 【核心修改】：不再吞噬报错！如果下载失败，直接抛出异常阻断执行
+                    var bytes = await client.GetByteArrayAsync(cleanUrl);
+                    File.WriteAllBytes(p, bytes);
                 }
             }
         }
 
-        // 3. 【核心修复】：星历引擎反射装载器
-        // 编译器报错 CS1729 说明其构造函数包含多个带有默认值的复杂参数，强类型 new 会被拦截
-        // 故在此使用反射来智能填补参数，强行启动引擎！
+        // 3. 星历引擎反射装载器 (强行启动并塞入参数)
         Type ephType = typeof(SwissEphemerides);
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         object ephInstance = null;
@@ -98,7 +95,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             parsedDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
         }
         
-        // 5. 强类型实例化人类图 (上一轮日志证明此行能完美通过编译)
+        // 5. 强类型实例化人类图 (日志证明此行能完美通过编译)
         var chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
 
         // 6. 渲染 Blazor 精美图表组件
