@@ -24,7 +24,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Ultimate StackTrace Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Moshier Mode Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     
@@ -51,6 +51,22 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             Console.WriteLine("强制加载程序集失败: " + ex.Message);
         }
 
+        // 4. 查找计算模式枚举，并【强行指定为 Moshier 模式】
+        // 因为服务器上没有几十兆的实体星历数据文件，如果用默认的 SwissEph 模式必定抛出空指针
+        var modeEnum = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+            .FirstOrDefault(t => t.Name == "EphCalculationMode" && t.IsEnum);
+
+        object modeValue = 0;
+        if (modeEnum != null) {
+            try {
+                modeValue = Enum.Parse(modeEnum, "Moshier", true);
+            } catch {
+                var vals = Enum.GetValues(modeEnum);
+                if (vals.Length > 0) modeValue = vals.GetValue(0);
+            }
+        }
+
         var ephInterface = AppDomain.CurrentDomain.GetAssemblies()
             .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
             .FirstOrDefault(t => t.Name == "IEphemerides");
@@ -63,7 +79,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             throw new Exception("缺少星历表引擎。请确认 AstrologyAPI.csproj 包含了 SharpAstrology.SwissEph。");
         }
 
-        // 4. 【终极修复】：无敌反射装载器，破解 Private/Internal 权限限制
+        // 5. 【终极修复】：无敌反射装载器，破解 Private/Internal 权限限制
         object ephInstance = null;
         string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
         if (!System.IO.Directory.Exists(ephPath)) {
@@ -84,6 +100,8 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                 for (int i = 0; i < pInfos.Length; i++) {
                     if (pInfos[i].ParameterType == typeof(string)) {
                         argsToPass[i] = ephPath;
+                    } else if (modeEnum != null && pInfos[i].ParameterType == modeEnum) {
+                        argsToPass[i] = modeValue; // 给引擎的配置也塞入 Moshier
                     } else if (pInfos[i].HasDefaultValue) {
                         argsToPass[i] = pInfos[i].DefaultValue;
                     } else if (pInfos[i].ParameterType.IsValueType) {
@@ -104,22 +122,15 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             throw new Exception($"装载引擎彻底失败。最后一个报错: {lastCtorError?.InnerException?.Message ?? lastCtorError?.Message}");
         }
 
-        // 5. 查找计算模式枚举
-        var modeEnum = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-            .FirstOrDefault(t => t.Name == "EphCalculationMode" && t.IsEnum);
-
-        var modeValue = modeEnum != null ? Enum.GetValues(modeEnum).GetValue(0) : 0;
-
         // 6. 【同步修复】使用相同的无敌反射器来实例化排盘对象
         object chartInstance = null;
         var chartCtors = concreteChartType.GetConstructors(flags);
         Exception chartCtorError = null;
         
-        // 连通性测试时间
+        // 测试时间，后续你可以接入 data.Date
         var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
 
-        // 【修改点】：从参数最少的简单构造函数开始尝试，并填补字符串空值
+        // 从参数最少的简单构造函数开始尝试，并填补字符串空值
         foreach (var ctor in chartCtors.OrderBy(c => c.GetParameters().Length)) {
             try {
                 var pInfos = ctor.GetParameters();
@@ -132,7 +143,7 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                     } else if (ephInterface != null && ephInterface.IsAssignableFrom(pt)) {
                         argsToPass[i] = ephInstance;
                     } else if (modeEnum != null && pt == modeEnum) {
-                        argsToPass[i] = modeValue;
+                        argsToPass[i] = modeValue; // 给排盘逻辑同样塞入 Moshier 配置
                     } else if (pInfos[i].HasDefaultValue) {
                         argsToPass[i] = pInfos[i].DefaultValue;
                     } else if (pt == typeof(string)) {
@@ -151,7 +162,6 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         }
 
         if (chartInstance == null) {
-            // 【核心修改】：将 InnerException 的完整 ToString 抛出，展示最底层的崩溃行号！
             throw new Exception($"排盘实体实例化失败。\n底层完整堆栈:\n{chartCtorError?.InnerException?.ToString() ?? chartCtorError?.ToString()}");
         }
 
