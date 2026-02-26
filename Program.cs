@@ -34,7 +34,7 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (jsDelivr CDN Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (DI-Injected Engine Active)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
     try {
@@ -45,26 +45,22 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
         }
         Environment.SetEnvironmentVariable("SE_EPHE_PATH", ephPath);
         
-        // 2. 自动化云端星历文件下载器 (使用最稳定且不限流的 jsDelivr 开源 CDN 加速节点)
+        // 2. 自动化云端星历文件下载器
         string[] ephFiles = { "seas_18.se1", "semo_18.se1", "sepl_18.se1" };
         using (var client = new HttpClient()) {
-            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"); 
-            
+            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0"); 
             foreach (var f in ephFiles) {
                 var p = Path.Combine(ephPath, f);
-                // 防伪校验：如果文件不存在，或者下载成了一个小体积的 404 文本 (真实的 se1 文件远大于 100KB)
                 if (!File.Exists(p) || new FileInfo(p).Length < 100000) {
                     // 拆分字符串防 Markdown 破坏
                     string cleanUrl = "https://" + "cdn.jsdelivr.net/gh/aloistr/swisseph@master/ephe/" + f;
-                    
-                    // 【核心修改】：不再吞噬报错！如果下载失败，直接抛出异常阻断执行
                     var bytes = await client.GetByteArrayAsync(cleanUrl);
                     File.WriteAllBytes(p, bytes);
                 }
             }
         }
 
-        // 3. 星历引擎反射装载器 (强行启动并塞入参数)
+        // 3. 星历引擎反射装载器 (融合依赖注入 DI 填补 ILogger 空指针)
         Type ephType = typeof(SwissEphemerides);
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         object ephInstance = null;
@@ -74,10 +70,26 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
                 var pInfos = ctor.GetParameters();
                 var argsToPass = new object[pInfos.Length];
                 for (int i = 0; i < pInfos.Length; i++) {
-                    if (pInfos[i].ParameterType == typeof(string)) argsToPass[i] = ephPath;
-                    else if (pInfos[i].HasDefaultValue) argsToPass[i] = pInfos[i].DefaultValue;
-                    else if (pInfos[i].ParameterType.IsValueType) argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType);
-                    else argsToPass[i] = null;
+                    var pt = pInfos[i].ParameterType;
+                    if (pt == typeof(string)) {
+                        argsToPass[i] = ephPath;
+                    } else if (pt.Name.Contains("ILogger")) {
+                        // 动态注入 ILogger，防止底层计算时试图打日志而触发空指针
+                        var loggerType = typeof(ILogger<>).MakeGenericType(ephType);
+                        argsToPass[i] = services.GetService(loggerType) ?? loggerFactory.CreateLogger(ephType.Name);
+                    } else {
+                        // 从 DI 容器解析其他未知依赖
+                        var svc = services.GetService(pt);
+                        if (svc != null) {
+                            argsToPass[i] = svc;
+                        } else if (pInfos[i].HasDefaultValue) {
+                            argsToPass[i] = pInfos[i].DefaultValue;
+                        } else if (pt.IsValueType) {
+                            argsToPass[i] = Activator.CreateInstance(pt);
+                        } else {
+                            argsToPass[i] = null;
+                        }
+                    }
                 }
                 ephInstance = ctor.Invoke(argsToPass);
                 break;
@@ -95,8 +107,17 @@ app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider servi
             parsedDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
         }
         
-        // 5. 强类型实例化人类图 (日志证明此行能完美通过编译)
-        var chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
+        // 5. 强类型实例化人类图并捕捉底层崩溃
+        HumanDesignChart chart = null;
+        try {
+            chart = new HumanDesignChart(parsedDate, eph, EphCalculationMode.Tropic);
+        } catch (Exception chartEx) {
+            // 【超级侦探】：如果再次抛出空指针，这里会打印出引擎所需的真实构造参数签名！
+            var sigs = string.Join(" | ", ephType.GetConstructors(flags).Select(c => 
+                "(" + string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name)) + ")"
+            ));
+            throw new Exception($"引擎排盘计算空指针崩溃！\n【引擎参数字典】: {sigs}\n内部报错: {chartEx.Message}\n堆栈: {chartEx.StackTrace}");
+        }
 
         // 6. 渲染 Blazor 精美图表组件
         await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
