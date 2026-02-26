@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>专业全息人类图 (含红黑行星数据栏)</title>
+    <!-- 引入 Tailwind CSS 进行快速美化 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Vue.js -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <style>
+        body { background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        .glass-panel { background: rgba(255, 255, 255, 0.98); box-shadow: 0 10px 40px rgba(0,0,0,0.06); border-radius: 1.5rem; border: 1px solid rgba(226, 232, 240, 0.8); }
+        
+        .chart-container { width: 100%; display: flex; justify-content: center; align-items: center; }
+        .chart-container svg { 
+            max-width: 100%; 
+            height: auto; 
+            filter: drop-shadow(0 15px 25px rgba(0,0,0,0.05)); 
+            border-radius: 16px;
+            /* 把 SVG 的背景改为透明，这样才能透出背后打坐的人体图 */
+            background: transparent !important;
+            padding: 1rem;
+        }
+        
+        /* 强制注入正确的缩放比例和居中对齐 */
+        .chart-container svg text {
+            font-size: 0.38px !important;
+            font-weight: 800 !important;
+            text-anchor: middle !important;
+            dominant-baseline: central !important;
+            font-family: ui-sans-serif, system-ui, sans-serif !important;
+        }
+        
+        /* 针对后端输出的灰色（未点亮）数字，稍微加深对比度 */
+        .chart-container svg text[fill="grey"],
+        .chart-container svg text[fill="lightgrey"] {
+            fill: #4b5563 !important;
+        }
+        
+        /* 数字微调，居中对齐 */
+        .chart-container svg .door text {
+            transform: translateY(0.04px); 
+        }
+
+        /* 为九大能量中心加上高级感描边 */
+        .chart-container svg polygon.center,
+        .chart-container svg rect.center,
+        .chart-container svg .center {
+            stroke: #1f2937 !important;
+            stroke-width: 0.008 !important;
+        }
+
+        @keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .animate-pulse-soft { animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8 flex justify-center items-start text-slate-800">
+
+<div id="app" class="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-8">
+    
+    <!-- 左侧表单区 -->
+    <!-- 【手机端显示修复】：将 sticky top-8 修改为 lg:sticky lg:top-8，使其仅在电脑宽屏时粘性固定，手机端自然流式滚动 -->
+    <div class="lg:col-span-4 glass-panel p-6 h-fit lg:sticky lg:top-8 z-20">
+        <div class="flex items-center gap-3 mb-2">
+            <span class="text-3xl">🌌</span>
+            <h1 class="text-2xl font-black tracking-tight text-slate-800">人类图解析引擎</h1>
+        </div>
+        <p class="text-sm text-slate-500 mb-6 border-b border-slate-100 pb-4">基于 SharpAstrology 物理推演</p>
+        
+        <form @submit.prevent="generateFromAPI" class="space-y-5">
+            <div>
+                <label class="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wider">姓名</label>
+                <input v-model="form.name" type="text" required placeholder="例如：张三" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+            </div>
+            
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wider">出生日期</label>
+                    <input v-model="form.date" type="date" required class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wider">
+                        出生时间 <span class="font-normal text-slate-400">(北京时间)</span>
+                    </label>
+                    <input v-model="form.time" type="time" required class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wider">出生省份</label>
+                    <input v-model="form.province" type="text" placeholder="例如：广东" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wider">出生城市</label>
+                    <input v-model="form.city" type="text" placeholder="例如：深圳" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all">
+                </div>
+            </div>
+            
+            <button type="submit" :disabled="loading" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-indigo-600/30 transition-all disabled:bg-slate-400 disabled:shadow-none flex justify-center items-center gap-2 text-lg">
+                <span v-if="loading">
+                    <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                </span>
+                {{ loading ? '星历引擎推演中...' : '生成全息能量图' }}
+            </button>
+        </form>
+    </div>
+
+    <!-- 右侧结果区 -->
+    <div class="lg:col-span-8">
+        
+        <div v-if="errorLog" class="glass-panel p-6 border-2 border-red-200 bg-red-50 mb-6 animate-[fadeIn_0.3s_ease-out]">
+            <h3 class="text-red-600 font-bold mb-2 flex items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                后端渲染发生错误
+            </h3>
+            <div class="bg-white p-4 rounded-lg border border-red-100 overflow-x-auto text-xs text-slate-700 font-mono whitespace-pre-wrap max-h-96 overflow-y-auto">
+                {{ errorLog }}
+            </div>
+        </div>
+
+        <!-- 成功结果展示区 -->
+        <div v-if="result && !loading" class="animate-[fadeIn_0.5s_ease-out]">
+            
+            <!-- 精美的数据仪表盘 -->
+            <div class="glass-panel p-6 mb-6">
+                <div class="flex justify-between items-center mb-6 pb-4 border-b border-slate-100">
+                    <h2 class="text-2xl font-black text-indigo-900">{{ result.name }} <span class="text-base font-medium text-slate-500 ml-2">的人类图解析报告</span></h2>
+                    <span v-if="result.location" class="text-sm font-medium text-slate-500 bg-slate-100 px-3 py-1 rounded-full">📍 {{ result.location }}</span>
+                </div>
+                
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div class="bg-indigo-50/50 p-4 rounded-xl border border-indigo-100/50">
+                        <div class="text-xs font-bold text-indigo-400 mb-1">类型 (Type)</div>
+                        <div class="font-bold text-slate-800">{{ result.type || '未知' }}</div>
+                    </div>
+                    <div class="bg-emerald-50/50 p-4 rounded-xl border border-emerald-100/50">
+                        <div class="text-xs font-bold text-emerald-400 mb-1">人生角色 (Profile)</div>
+                        <div class="font-bold text-slate-800">{{ result.profile || '未知' }}</div>
+                    </div>
+                    <div class="bg-amber-50/50 p-4 rounded-xl border border-amber-100/50">
+                        <div class="text-xs font-bold text-amber-500 mb-1">内在权威 (Authority)</div>
+                        <div class="font-bold text-slate-800">{{ result.authority || '未知' }}</div>
+                    </div>
+                    <div class="bg-rose-50/50 p-4 rounded-xl border border-rose-100/50">
+                        <div class="text-xs font-bold text-rose-400 mb-1">定义 (Definition)</div>
+                        <div class="font-bold text-slate-800">{{ result.definition || '未知' }}</div>
+                    </div>
+                    
+                    <div class="bg-blue-50/50 p-4 rounded-xl border border-blue-100/50 col-span-2 md:col-span-2">
+                        <div class="text-xs font-bold text-blue-400 mb-1">人生策略 (Strategy)</div>
+                        <div class="font-bold text-slate-800">{{ result.strategy || '未知' }}</div>
+                    </div>
+                    <div class="bg-purple-50/50 p-4 rounded-xl border border-purple-100/50 col-span-2 md:col-span-2">
+                        <div class="text-xs font-bold text-purple-400 mb-1">非自己主题 (Not-Self Theme)</div>
+                        <div class="font-bold text-slate-800">{{ result.notSelf || '未知' }}</div>
+                    </div>
+                    
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 col-span-2 md:col-span-4">
+                        <div class="text-xs font-bold text-slate-500 mb-1 flex items-center gap-1">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
+                            轮回交叉 (Incarnation Cross)
+                        </div>
+                        <div class="font-bold text-slate-800">{{ result.cross || '暂无数据' }}</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 图表渲染区与左右行星侧边栏整合 -->
+            <div class="glass-panel p-4 md:p-6 relative overflow-hidden">
+                <!-- 顶部工具栏 -->
+                <div class="absolute top-4 right-4 flex gap-2 z-30">
+                    <button @click="copySVG" class="bg-slate-800 text-white text-xs px-3 py-2 rounded-lg hover:bg-slate-700 transition shadow-sm flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        复制 SVG
+                    </button>
+                </div>
+
+                <!-- 左右行星栏 + 中间能量图 -->
+                <div class="flex flex-row justify-center items-stretch gap-2 md:gap-6 w-full mt-8 relative">
+                    
+                    <!-- 【已修复：基于指定参数硬编码渲染底图】 -->
+                    <img src="https://raw.githubusercontent.com/Mr-shuchan/hd-csharp-api/refs/heads/main/download.jpg" 
+                         alt="人类图脉轮底图" 
+                         class="absolute transform -translate-x-1/2 -translate-y-1/2 h-auto object-contain z-0" 
+                         style="
+                             width: 100%;
+                             left: 50%;
+                             top: 40%;
+                             opacity: 0.4;
+                             pointer-events: none;
+                             mix-blend-mode: multiply;
+                         ">
+
+                    <!-- 左侧：潜意识 (Design / 红) -->
+                    <div class="flex flex-col justify-between py-4 text-red-500 font-bold text-sm md:text-lg select-none z-10">
+                        <div class="text-xs text-red-400 mb-2 text-center uppercase tracking-widest hidden md:block">Design</div>
+                        <div v-for="p in result.designActivations" :key="'d_'+p.planet" class="flex justify-end items-center gap-1 md:gap-2">
+                            <span class="text-xs md:text-base opacity-80">{{ p.gate }}.{{ p.line }}</span>
+                            <span class="text-xl md:text-2xl w-6 md:w-8 text-center" v-html="getPlanetSymbol(p.planet)"></span>
+                        </div>
+                    </div>
+
+                    <!-- 中间：SVG 图表容器 -->
+                    <div class="flex-grow flex justify-center items-center min-w-0 relative" style="flex-basis: 60%;">
+                        <!-- 渲染出的 SVG 图表 -->
+                        <div class="w-full chart-container relative z-10" v-html="result.chartImageSVG"></div>
+                    </div>
+
+                    <!-- 右侧：显意识 (Personality / 黑) -->
+                    <div class="flex flex-col justify-between py-4 text-slate-800 font-bold text-sm md:text-lg select-none z-10">
+                        <div class="text-xs text-slate-400 mb-2 text-center uppercase tracking-widest hidden md:block">Personality</div>
+                        <div v-for="p in result.personalityActivations" :key="'p_'+p.planet" class="flex justify-start items-center gap-1 md:gap-2">
+                            <span class="text-xl md:text-2xl w-6 md:w-8 text-center" v-html="getPlanetSymbol(p.planet)"></span>
+                            <span class="text-xs md:text-base opacity-80">{{ p.gate }}.{{ p.line }}</span>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+            
+        </div>
+        
+        <!-- 占位符状态 -->
+        <div v-else-if="!errorLog" class="glass-panel p-8 flex flex-col justify-center items-center h-full min-h-[500px] text-slate-400 bg-white/40 border-2 border-dashed border-slate-200">
+            <div class="text-6xl mb-6 opacity-30 animate-pulse-soft">🔮</div>
+            <p class="text-xl font-medium text-slate-500 mb-2">等待能量链接</p>
+            <p class="text-sm text-center max-w-sm leading-relaxed text-slate-400">
+                输入您的出生信息并点击生成，系统将自动进行时区对齐并唤醒物理推演引擎。
+            </p>
+        </div>
+    </div>
+</div>
+
+<script>
+Vue.createApp({
+    data() {
+        return {
+            form: { 
+                name: '测试用户', 
+                date: '2000-01-01', 
+                time: '12:00',
+                province: '',
+                city: ''
+            },
+            loading: false,
+            result: null,
+            errorLog: null
+        };
+    },
+    methods: {
+        getPlanetSymbol(planetName) {
+            const symbols = {
+                "Sun": "☉",
+                "Earth": "⊕",
+                "NorthNode": "☊",
+                "SouthNode": "☋",
+                "Moon": "☽",
+                "Mercury": "☿",
+                "Venus": "♀",
+                "Mars": "♂",
+                "Jupiter": "♃",
+                "Saturn": "♄",
+                "Uranus": "♅",
+                "Neptune": "♆",
+                "Pluto": "♇"
+            };
+            return symbols[planetName] || "✨";
+        },
+        copySVG() {
+            const svgElement = document.querySelector('.chart-container svg');
+            if (svgElement) {
+                navigator.clipboard.writeText(svgElement.outerHTML).then(() => {
+                    alert('✅ SVG 已复制！');
+                });
+            }
+        },
+        async generateFromAPI() {
+            this.loading = true;
+            this.result = null; 
+            this.errorLog = null; 
+            try {
+                const localDateTimeStr = `${this.form.date}T${this.form.time}:00+08:00`; 
+                const localDateObj = new Date(localDateTimeStr);
+                
+                const utcDate = localDateObj.getUTCFullYear() + '-' + 
+                                String(localDateObj.getUTCMonth() + 1).padStart(2, '0') + '-' + 
+                                String(localDateObj.getUTCDate()).padStart(2, '0');
+                const utcTime = String(localDateObj.getUTCHours()).padStart(2, '0') + ':' + 
+                                String(localDateObj.getUTCMinutes()).padStart(2, '0');
+
+                const response = await fetch('https://hd-csharp-api.onrender.com/api/generate-chart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        Name: this.form.name,
+                        Date: utcDate, 
+                        Time: utcTime,
+                        Province: this.form.province,
+                        City: this.form.city
+                    })
+                });
+                
+                const contentType = response.headers.get("content-type");
+                if (!contentType || !contentType.includes("application/json")) {
+                    const errorText = await response.text();
+                    throw new Error("后端服务唤醒中或发生错误。\n" + errorText);
+                }
+                
+                const resData = await response.json();
+                
+                if (resData.success) {
+                    let d = resData.data;
+
+                    const typeMap = {
+                        "Manifestor": "显示者 (Manifestor)",
+                        "Generator": "生产者 (Generator)",
+                        "ManifestingGenerator": "显示生产者 (Manifesting Generator)",
+                        "Projector": "投射者 (Projector)",
+                        "Reflector": "反映者 (Reflector)"
+                    };
+                    let cnType = typeMap[d.type] || d.type;
+                    d.type = cnType;
+
+                    d.strategy = cnType.includes("生产者") ? "等待回应" : 
+                                 cnType.includes("显示者") ? "告知" : 
+                                 cnType.includes("投射者") ? "等待被邀请" : 
+                                 cnType.includes("反映者") ? "等待完整的月相周期" : "未知";
+
+                    d.notSelf = cnType.includes("生产者") ? "挫败" : 
+                                cnType.includes("显示者") ? "愤怒" : 
+                                cnType.includes("投射者") ? "苦涩" : 
+                                cnType.includes("反映者") ? "失望" : "未知";
+
+                    const profileMap = { 
+                        "OneThree": "1/3", "OneFour": "1/4", "TwoFour": "2/4", "TwoFive": "2/5", 
+                        "ThreeFive": "3/5", "ThreeSix": "3/6", "FourSix": "4/6", "FourOne": "4/1", 
+                        "FiveOne": "5/1", "FiveTwo": "5/2", "SixTwo": "6/2", "SixThree": "6/3" 
+                    };
+                    if(d.profile && profileMap[d.profile]) d.profile = profileMap[d.profile];
+
+                    if(d.definition) {
+                        let def = d.definition.toLowerCase();
+                        if(def.includes('single')) d.definition = "一分人";
+                        else if(def.includes('triple')) d.definition = "三分人";
+                        else if(def.includes('quadruple')) d.definition = "四分人";
+                        else if(def.includes('split')) d.definition = "二分人";
+                        else if(def.includes('none') || def.includes('empty')) d.definition = "无定义";
+                    }
+
+                    if(d.authority) {
+                        let auth = d.authority.toLowerCase();
+                        if(auth.includes('emotional')) d.authority = "情绪型权威";
+                        else if(auth.includes('sacral')) d.authority = "荐骨型权威";
+                        else if(auth.includes('splenic')) d.authority = "直觉型权威";
+                        else if(auth.includes('ego') || auth.includes('heart')) d.authority = "意志力型权威";
+                        else if(auth.includes('self')) d.authority = "自我投射型权威";
+                        else if(auth.includes('mental')) d.authority = "环境型权威 (精神)";
+                        else if(auth.includes('lunar')) d.authority = "月亮型权威";
+                        else if(auth.includes('none') || auth.includes('no')) d.authority = "无内在权威";
+                    }
+
+                    if(d.cross) {
+                        let crossStr = d.cross;
+                        
+                        crossStr = crossStr.replace("RightAngleCrossOf", "右角度交叉之 ")
+                                           .replace("LeftAngleCrossOf", "左角度交叉之 ")
+                                           .replace("JuxtapositionCrossOf", "并列交叉之 ")
+                                           .replace(/The/gi, ""); 
+                        
+                        const crossDict = {
+                            "Separation": "分离", "Planning": "计划", "Maya": "玛雅",
+                            "VesselOfLove": "爱之船", "Contagion": "传染", "Explanation": "解释",
+                            "Eden": "伊甸园", "Prevention": "预防", "Tension": "张力",
+                            "Consciousness": "意识", "Industry": "勤奋", "Empire": "帝国",
+                            "Defiance": "反抗", "Obscuration": "模糊", "Migration": "迁移",
+                            "Masks": "面具", "Wishes": "愿望", "Illusion": "幻觉",
+                            "Incarnation": "化身", "Healing": "疗愈", "Alignment": "对齐",
+                            "Unexpected": "意外", "Penetration": "穿透", "Spirit": "精神",
+                            "Laws": "法则", "Rulership": "统治", "Upheaval": "动荡", 
+                            "Experimentation": "体验", "Service": "服务", "Detail": "细节",
+                            "Understanding": "理解", "Paradox": "悖论", "Demands": "要求",
+                            "Refinement": "提炼", "Information": "信息", "Cycles": "周期",
+                            "Clarion": "号角", "Sphinx": "斯芬克斯", "SleepingPhoenix": "沉睡的凤凰",
+                            "Duality": "二元性", "Bija": "玛雅"
+                        };
+                        
+                        for (const [eng, chn] of Object.entries(crossDict)) {
+                            crossStr = crossStr.replace(new RegExp(eng, 'gi'), chn);
+                        }
+                        
+                        d.cross = crossStr.replace(/(\d+)/g, ' $1').trim();
+                    }
+
+                    this.result = d;
+                } else {
+                    this.errorLog = resData.message;
+                }
+            } catch (error) {
+                console.error(error);
+                this.errorLog = error.message || '无法连接到 C# API 后端，请检查网络或服务状态。';
+            } finally {
+                this.loading = false;
+            }
+        }
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
