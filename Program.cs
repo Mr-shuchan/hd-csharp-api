@@ -1,14 +1,19 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Logging;
+
+// 【绝杀线索】：根据前端堆栈提供的精准命名空间，直接引入官方类！
+using SharpAstrology.DataModels;
+using SharpAstrology.Interfaces;
+using SharpAstrology.Enums;
+using SharpAstrology.Ephemerides;
 using SharpAstrology.HumanDesign.BlazorComponents;
-using System.Collections.Generic;
+
 using System;
-using System.Linq;
-using System.Reflection; // 引入反射核心命名空间
+using System.Collections.Generic;
+using System.IO;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,167 +29,45 @@ builder.Services.AddLocalization();
 var app = builder.Build();
 app.UseCors();
 
-app.MapGet("/", () => "C# SharpAstrology API is running! (Moshier Mode Active)");
+app.MapGet("/", () => "C# SharpAstrology API is running! (Clean Strongly-Typed Mode)");
 
 app.MapPost("/api/generate-chart", async (InputData data, IServiceProvider services, ILoggerFactory loggerFactory) => {
-    
     try {
-        await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
+        // 1. 创建合法的星历表空文件夹
+        string ephPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
+        if (!Directory.Exists(ephPath)) {
+            Directory.CreateDirectory(ephPath);
+        }
+
+        // 2. 直接使用强类型实例化星历引擎！(彻底告别危险的反射与空指针)
+        IEphemerides eph = new SwissEphemerides(ephPath);
         
-        // 1. 获取渲染组件及需要的参数类型
-        var componentType = typeof(HumanDesignGraph);
-        var chartProp = componentType.GetProperty("Chart") ?? 
-                        componentType.GetProperties().FirstOrDefault(p => p.Name.Contains("Chart"));
-        if (chartProp == null) throw new Exception("在组件中找不到 Chart 属性。");
-        var chartInterfaceType = chartProp.PropertyType;
+        // 3. 强制指定为 Moshier 模式，纯数学计算，完美解决服务器没实体文件的问题
+        var mode = EphCalculationMode.Moshier;
         
-        // 2. 查找 HumanDesignChart 实体类
-        var concreteChartType = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-            .FirstOrDefault(t => chartInterfaceType.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
-        if (concreteChartType == null) throw new Exception("无法找到具体的排盘类！");
-
-        // 3. 强制加载星历表引擎程序集
-        try {
-            Assembly.Load("SharpAstrology.SwissEph");
-        } catch (Exception ex) {
-            Console.WriteLine("强制加载程序集失败: " + ex.Message);
-        }
-
-        // 4. 查找计算模式枚举，并【强行指定为 Moshier 模式】
-        // 因为服务器上没有几十兆的实体星历数据文件，如果用默认的 SwissEph 模式必定抛出空指针
-        var modeEnum = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-            .FirstOrDefault(t => t.Name == "EphCalculationMode" && t.IsEnum);
-
-        object modeValue = 0;
-        if (modeEnum != null) {
-            try {
-                modeValue = Enum.Parse(modeEnum, "Moshier", true);
-            } catch {
-                var vals = Enum.GetValues(modeEnum);
-                if (vals.Length > 0) modeValue = vals.GetValue(0);
-            }
-        }
-
-        var ephInterface = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-            .FirstOrDefault(t => t.Name == "IEphemerides");
-
-        var concreteEphType = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
-            .FirstOrDefault(t => ephInterface != null && ephInterface.IsAssignableFrom(t) && t.IsClass && !t.IsAbstract);
-
-        if (concreteEphType == null) {
-            throw new Exception("缺少星历表引擎。请确认 AstrologyAPI.csproj 包含了 SharpAstrology.SwissEph。");
-        }
-
-        // 5. 【终极修复】：无敌反射装载器，破解 Private/Internal 权限限制
-        object ephInstance = null;
-        string ephPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ephe_data");
-        if (!System.IO.Directory.Exists(ephPath)) {
-            System.IO.Directory.CreateDirectory(ephPath);
-        }
-
-        // 获取所有构造函数，无视其是否公开
-        var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        var ctors = concreteEphType.GetConstructors(flags);
-        if (ctors.Length == 0) throw new Exception($"引擎 {concreteEphType.Name} 没有任何实例构造函数！");
-
-        Exception lastCtorError = null;
-        foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length)) {
-            try {
-                var pInfos = ctor.GetParameters();
-                var argsToPass = new object[pInfos.Length];
-                
-                for (int i = 0; i < pInfos.Length; i++) {
-                    if (pInfos[i].ParameterType == typeof(string)) {
-                        argsToPass[i] = ephPath;
-                    } else if (modeEnum != null && pInfos[i].ParameterType == modeEnum) {
-                        argsToPass[i] = modeValue; // 给引擎的配置也塞入 Moshier
-                    } else if (pInfos[i].HasDefaultValue) {
-                        argsToPass[i] = pInfos[i].DefaultValue;
-                    } else if (pInfos[i].ParameterType.IsValueType) {
-                        argsToPass[i] = Activator.CreateInstance(pInfos[i].ParameterType);
-                    } else {
-                        argsToPass[i] = null;
-                    }
-                }
-                
-                ephInstance = ctor.Invoke(argsToPass);
-                break; // 只要有一个构造函数成功被破译并启动，立刻跳出
-            } catch (Exception ex) {
-                lastCtorError = ex;
-            }
-        }
-
-        if (ephInstance == null) {
-            throw new Exception($"装载引擎彻底失败。最后一个报错: {lastCtorError?.InnerException?.Message ?? lastCtorError?.Message}");
-        }
-
-        // 6. 【同步修复】使用相同的无敌反射器来实例化排盘对象
-        object chartInstance = null;
-        var chartCtors = concreteChartType.GetConstructors(flags);
-        Exception chartCtorError = null;
-        
-        // 测试时间，后续你可以接入 data.Date
+        // 4. 解析时间并直接实例化人类图
+        // TODO: 跑通连通性测试后，可使用 data.Date 替换此处的硬编码时间
         var parsedDate = new DateTime(2000, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var chart = new HumanDesignChart(parsedDate, eph, mode);
 
-        // 从参数最少的简单构造函数开始尝试，并填补字符串空值
-        foreach (var ctor in chartCtors.OrderBy(c => c.GetParameters().Length)) {
-            try {
-                var pInfos = ctor.GetParameters();
-                var argsToPass = new object[pInfos.Length];
-                
-                for (int i = 0; i < pInfos.Length; i++) {
-                    var pt = pInfos[i].ParameterType;
-                    if (pt == typeof(DateTime) || pt == typeof(DateTimeOffset)) {
-                        argsToPass[i] = parsedDate;
-                    } else if (ephInterface != null && ephInterface.IsAssignableFrom(pt)) {
-                        argsToPass[i] = ephInstance;
-                    } else if (modeEnum != null && pt == modeEnum) {
-                        argsToPass[i] = modeValue; // 给排盘逻辑同样塞入 Moshier 配置
-                    } else if (pInfos[i].HasDefaultValue) {
-                        argsToPass[i] = pInfos[i].DefaultValue;
-                    } else if (pt == typeof(string)) {
-                        argsToPass[i] = ""; // 字符串给空串，避免引发内部空指针
-                    } else if (pt.IsValueType) {
-                        argsToPass[i] = Activator.CreateInstance(pt);
-                    } else {
-                        argsToPass[i] = null;
-                    }
-                }
-                chartInstance = ctor.Invoke(argsToPass);
-                break;
-            } catch (Exception ex) {
-                chartCtorError = ex;
-            }
-        }
-
-        if (chartInstance == null) {
-            throw new Exception($"排盘实体实例化失败。\n底层完整堆栈:\n{chartCtorError?.InnerException?.ToString() ?? chartCtorError?.ToString()}");
-        }
-
-        // 7. 渲染精美图表
-        var chartHtmlString = await htmlRenderer.Dispatcher.InvokeAsync(async () =>
-        {
-            var dictionary = new Dictionary<string, object> { { chartProp.Name, chartInstance } };
-            var parameters = ParameterView.FromDictionary(dictionary);
-            
-            var output = await htmlRenderer.RenderComponentAsync<HumanDesignGraph>(parameters);
-            return output.ToHtmlString();
-        });
+        // 5. 渲染 Blazor 精美图表组件
+        await using var htmlRenderer = new HtmlRenderer(services, loggerFactory);
+        var dictionary = new Dictionary<string, object> { { "Chart", chart } };
+        var parameters = ParameterView.FromDictionary(dictionary);
+        
+        var output = await htmlRenderer.RenderComponentAsync<HumanDesignGraph>(parameters);
 
         return Results.Json(new {
             success = true,
             data = new {
                 name = data.Name,
-                chartImageSVG = chartHtmlString 
+                chartImageSVG = output.ToHtmlString()
             }
         });
     } 
     catch (Exception ex) {
-        return Results.Json(new { success = false, message = ex.ToString() });
+        // 终极报错显影剂
+        return Results.Json(new { success = false, message = "底层完整堆栈:\n" + ex.ToString() });
     }
 });
 
